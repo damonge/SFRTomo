@@ -1,4 +1,9 @@
-class IvTracer(Tracer):
+import pyccl as ccl
+from scipy.interpolate import interp1d
+import numpy as np
+
+
+class IvTracer(ccl.Tracer):
     """Specific :class:`Tracer` associated with the cosmic infrared
     background intensity at a specific frequency v (Iv). 
     The radial kernel for this tracer is
@@ -23,13 +28,15 @@ class IvTracer(Tracer):
             kernel. zmax = 6 by default (reionization)
     """
     def __init__(self, cosmo, snu_z, z_arr, z_min=0., z_max=6.):
-        self.chi_max = comoving_radial_distance(cosmo, 1./(1+z_max))
-        self.chi_min = comoving_radial_distance(cosmo, 1./(1+z_min))
-        chi_z = comoving_radial_distance(cosmo, 1./(1+z_arr))
-        snu_inter = interp1d(chi_z, snu_z, kind='linear', bounds_error=False, fill_value="extrapolate")
+        self.chi_max = ccl.comoving_radial_distance(cosmo, 1./(1+z_max))
+        self.chi_min = ccl.comoving_radial_distance(cosmo, 1./(1+z_min))
+        chi_z = ccl.comoving_radial_distance(cosmo, 1./(1+z_arr))
+        # Transform to MJy (units in data)
+        snu_inter = interp1d(chi_z, snu_z*1E-6, kind='linear',
+                             bounds_error=False, fill_value="extrapolate")
         chi_arr = np.linspace(self.chi_min, self.chi_max, len(snu_z))
         snu_arr = snu_inter(chi_arr)
-        K = 1.0e-10 # Kennicutt constant in units of M_sun/yr/L_sun
+        K = 1.0e-10  # Kennicutt constant in units of M_sun/yr/L_sun
         w_arr = chi_arr**2*snu_arr/K
         self._trc = []
         self.add_tracer(cosmo, kernel=(chi_arr, w_arr))

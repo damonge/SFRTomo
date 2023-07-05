@@ -1,12 +1,9 @@
-from *.profiles import HaloProfile, HaloProfileNFW
-from *.profiles_2pt import Profile2pt
-from *.concentration import Concentration
-from *.hmfunc import MassFuncTinker10
 import numpy as np
 from scipy.integrate import simps
-from scipy.special import lambertw
+import pyccl as ccl
 
-class HaloProfileCIBM21(HaloProfile):
+
+class HaloProfileCIBM21(ccl.halos.HaloProfile):
     """ CIB profile implementing the model by Maniyar et al.
     (A&A 645, A40 (2021)).
 
@@ -76,10 +73,15 @@ class HaloProfileCIBM21(HaloProfile):
         Mmin (float): minimum subhalo mass.
     """
     name = 'CIBM21'
+    _lnten = 2.30258509299
 
-    def __init__(self, cosmo, c_M_relation, log10meff=12.7, etamax=0.42,
-                 sigLM0=1.75, tau=1.17, zc=1.5, Mmin=1E5):
-        if not isinstance(c_M_relation, Concentration):
+    def __init__(self, cosmo, c_M_relation, log10meff=12.94, etamax=0.42,
+                 sigLM0=1.75, tau=1.17, zc=1.5, Mmin=1E5, fsub=0.134,
+                 fast_integ=False,
+                 log10M0=11.34, log10Mz=0.692,
+                 eps0=0.005, epsz=0.689, beta0=3.344, betaz=-2.079,
+                 gamma0=0.966, gammaz=0.0, emerge=False):
+        if not isinstance(c_M_relation, ccl.halos.Concentration):
             raise TypeError("c_M_relation must be of type `Concentration`)")
             
         self.Omega_b = cosmo['Omega_b']
@@ -91,7 +93,18 @@ class HaloProfileCIBM21(HaloProfile):
         self.tau = tau
         self.zc = zc
         self.Mmin = Mmin
-        self.pNFW = HaloProfileNFW(c_M_relation)
+        self.fsub = fsub
+        self.fast_integ = fast_integ
+        self.log10M0 = log10M0
+        self.log10Mz = log10Mz
+        self.eps0 = eps0
+        self.epsz = epsz
+        self.beta0 = beta0
+        self.betaz = betaz
+        self.gamma0 = gamma0
+        self.gammaz = gammaz
+        self.emerge = emerge
+        self.pNFW = ccl.halos.HaloProfileNFW(c_M_relation)
         super(HaloProfileCIBM21, self).__init__()
 
     def dNsub_dlnM_TinkerWetzel10(self, Msub, Mparent):
@@ -108,7 +121,10 @@ class HaloProfileCIBM21(HaloProfile):
 
 
     def update_parameters(self, log10meff=None, etamax=None,
-                          sigLM0=None, tau=None, zc=None, Mmin=None):
+                          sigLM0=None, tau=None, zc=None, Mmin=None,
+                          fsub=None, log10M0=None, log10Mz=None,
+                          eps0=None, epsz=None, beta0=None, betaz=None,
+                          gamma0=None, gammaz=None):
         """ Update any of the parameters associated with
         this profile. Any parameter set to `None` won't be updated.
 
@@ -124,7 +140,7 @@ class HaloProfileCIBM21(HaloProfile):
             self.l10meff = log10meff
         if etamax is not None:
             self.etamax = etamax
-        if sigLM is not None:
+        if sigLM0 is not None:
             self.sigLM0 = sigLM0
         if tau is not None:
             self.tau = tau
@@ -132,6 +148,24 @@ class HaloProfileCIBM21(HaloProfile):
             self.zc = zc
         if Mmin is not None:
             self.Mmin = Mmin
+        if fsub is not None:
+            self.fsub = fsub
+        if log10M0 is not None:
+            self.log10M0 = log10M0
+        if log10Mz is not None:
+            self.log10Mz = log10Mz
+        if eps0 is not None:
+            self.eps0 = eps0
+        if epsz is not None:
+            self.epsz = epsz
+        if beta0 is not None:
+            self.beta0 = beta0
+        if betaz is not None:
+            self.betaz = betaz
+        if gamma0 is not None:
+            self.gamma0 = gamma0
+        if gammaz is not None:
+            self.gammaz = gammaz
 
     def sigLM(self, M, a):
         z = 1/a - 1
@@ -147,31 +181,60 @@ class HaloProfileCIBM21(HaloProfile):
             else :
                 return self.sigLM0 - self.tau * max(0, self.zc-z)
 
+    def _efficiency(self, M, a):
+        if self.emerge:
+            t = 1-a
+            M1 = 10**(self.log10M0+self.log10Mz*t)
+            eps = self.eps0+self.epsz*t
+            beta = self.beta0+self.betaz*t
+            gamma = self.gamma0+self.gammaz*t
+            mr = M/M1
+            eta = 2*eps/(mr**gamma+1/mr**beta)
+        else:
+            eta = self.etamax * np.exp(-0.5*((np.log(M) -
+                                              self._lnten*self.l10meff)/
+                                             self.sigLM(M, a))**2)
+        return eta
+
     def _SFR(self, M, a):
         z = 1/a - 1
         # Efficiency - eta
-        eta = self.etamax * np.exp(-0.5*((np.log(M) - np.log(10)*self.l10meff)/self.sigLM(M, a))**2)
+        eta = self._efficiency(M, a)
         # Baryonic Accretion Rate - BAR
-        MGR = 46.1 * (M/1e12)**1.1 * (1+1.11*z) * np.sqrt(self.Omega_m*(1+z)**3 + self.Omega_L)
+        MGR = 46.1 * (M*1e-12)**1.1 * (1+1.11*z) * np.sqrt(self.Omega_m*(1+z)**3 + self.Omega_L)
         BAR = self.Omega_b/self.Omega_m * MGR
         return eta * BAR
 
     def _SFRcen(self, M, a):
-        SFRcen = self._SFR(M, a)
+        SFRcen = self._SFR(M*(1-self.fsub), a)
         return SFRcen
 
     def _SFRsat(self, M, a):
-        fsub = 0.134
-        SFRsat = np.zeros_like(M)
-        for iM, Mhalo in enumerate(M):
+        if self.fast_integ:
+            SFRsat = np.zeros_like(M)
+            goodM = M >= self.Mmin
+            M_use = (1-self.fsub)*M[goodM, None]
+            nm = max(2, 3*int(np.log10(np.max(M_use)/self.Mmin)))
+            Msub = np.geomspace(self.Mmin, np.max(M_use), nm+1)[None, :]
+            # All these arrays are of shape [nM_parent, nM_sub]
+            dnsubdlnm = self.dNsub_dlnM_TinkerWetzel10(Msub, M_use)
+            SFRI = self._SFR(Msub.flatten(), a)[None, :]
+            SFRII = self._SFR(M_use, a)*Msub/M_use
+            Ismall = SFRI < SFRII
+            SFR = SFRI*Ismall + SFRII*(~Ismall)
+            integ = dnsubdlnm*SFR*(M_use >= Msub)
+            SFRsat[goodM] = simps(integ, x=np.log(Msub))
+            return SFRsat
+            
+        SFRsat = np.zeros_like(M) 
+        for iM, Mhalo in enumerate(M*(1-self.fsub)):
             if Mhalo > self.Mmin:
                 nm = max(2, int(np.log10(Mhalo/self.Mmin)*10))
-                Mhalo = Mhalo*(1-fsub)
                 Msub = np.geomspace(self.Mmin, Mhalo, nm+1)
                 dnsubdlnm = self.dNsub_dlnM_TinkerWetzel10(Msub, Mhalo)
                 SFRI = self._SFR(Msub, a)
                 SFRII = self._SFR(Mhalo, a)*(Msub/Mhalo)
-                SFRsub = np.minimum(SFRI,SFRII)
+                SFRsub = np.minimum(SFRI, SFRII)
                 integ = dnsubdlnm*SFRsub
                 SFRsat[iM] = simps(integ, x=np.log(Msub))
         return SFRsat
@@ -198,8 +261,8 @@ class HaloProfileCIBM21(HaloProfile):
 
         SFRc = self._SFRcen(M_use, a)
         SFRs = self._SFRsat(M_use, a)
-        uk = self.pNFW._fourier(cosmo, k_use, M_use,
-                                a, mass_def)/M_use[:, None]
+        uk = 1#self.pNFW._fourier(cosmo, k_use, M_use,
+              #                  a, mass_def)/M_use[:, None]
         prof = SFRc[:, None]+SFRs[:, None]*uk
         
         if np.ndim(k) == 0:
@@ -225,46 +288,3 @@ class HaloProfileCIBM21(HaloProfile):
         if np.ndim(M) == 0:
             prof = np.squeeze(prof, axis=0)
         return prof
-
-
-class Profile2ptCIBM21(Profile2pt):
-    """ This class implements the Fourier-space 1-halo 2-point
-    correlator for the CIB profile. It follows closely the
-    implementation of the equivalent HOD quantity
-    (see :class:`~pyccl.halos.profiles_2pt.Profile2ptHOD`
-    and Eq. 15 of McCarthy & Madhavacheril (2021PhRvD.103j3515M)).
-    """
-    def fourier_2pt(self, prof, cosmo, k, M, a,
-                    prof2=None, mass_def=None):
-        """ Returns the Fourier-space two-point moment for the CIB
-        profile.
-
-        Args:
-            prof (:class:`HaloProfileCIBM21`):
-                halo profile for which the second-order moment
-                is desired.
-            cosmo (:class:`~pyccl.core.Cosmology`): a Cosmology object.
-            k (float or array_like): comoving wavenumber in Mpc^-1.
-            M (float or array_like): halo mass in units of M_sun.
-            a (float): scale factor.
-            prof2 (:class:`HaloProfileCIBM21`):
-                second halo profile for which the second-order moment
-                is desired. If `None`, the assumption is that you want
-                an auto-correlation. Note that only auto-correlations
-                are allowed in this case.
-            mass_def (:obj:`~pyccl.halos.massdef.MassDef`): a mass
-                definition object.
-
-        Returns:
-            float or array_like: second-order Fourier-space
-            moment. The shape of the output will be `(N_M, N_k)`
-            where `N_k` and `N_m` are the sizes of `k` and `M`
-            respectively. If `k` or `M` are scalars, the
-            corresponding dimension will be squeezed out on output.
-        """
-        if not isinstance(prof, HaloProfileCIBM21):
-            raise TypeError("prof must be of type `HaloProfileCIB`")
-        if prof2 is not None:
-            if not isinstance(prof2, HaloProfileCIBM21):
-                raise TypeError("prof must be of type `HaloProfileCIB`")
-        return prof._fourier_variance(cosmo, k, M, a, mass_def)
